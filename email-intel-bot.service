@@ -1,0 +1,15 @@
+[Unit]
+Description=24/7 Telegram Email Briefing Bot Server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/email-intel-bot
+ExecStart=/opt/email-intel-bot/.venv/bin/python bot_server.py
+Restart=on-failure
+RestartSec=10
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

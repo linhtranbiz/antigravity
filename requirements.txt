@@ -1,0 +1,8 @@
+# AI Telegram Briefing Bot — Dependencies
+
+python-telegram-bot==21.6
+anthropic>=0.34.0
+python-dotenv>=1.0.0
+google-auth-oauthlib>=1.2.0
+google-api-python-client>=2.120.0
+requests>=2.31.0
