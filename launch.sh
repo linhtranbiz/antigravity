@@ -102,6 +102,27 @@ sleep 2
 if systemctl is-active --quiet "$SERVICE_FILE"; then
   echo -e "${GREEN}★ SUCCESS: DDS Email Intel Bot is running!${NC}"
   systemctl status "$SERVICE_FILE" --no-pager
+  
+  echo -e "${YELLOW}Calculating next briefing run time...${NC}"
+  "$APP_DIR/.venv/bin/python" -c '
+import datetime as dt
+from zoneinfo import ZoneInfo
+tz = ZoneInfo("Asia/Ho_Chi_Minh")
+now = dt.datetime.now(tz)
+times = [
+    ("Morning Brief", now.replace(hour=7, minute=30, second=0, microsecond=0)),
+    ("Lunch Brief", now.replace(hour=11, minute=30, second=0, microsecond=0)),
+    ("Day Break Brief", now.replace(hour=16, minute=0, second=0, microsecond=0))
+]
+next_brief = None
+for name, t in times:
+    if t > now:
+        next_brief = (name, t)
+        break
+if not next_brief:
+    next_brief = (times[0][0], times[0][1] + dt.timedelta(days=1))
+print(f"\033[1;32m★ Next Scheduled Briefing: {next_brief[0]} at {next_brief[1].strftime(\"%Y-%m-%d %H:%M:%S %Z\")}\033[0m")
+'
 else
   echo -e "${RED}❌ ERROR: Service failed to start. Printing systemd logs:${NC}"
   journalctl -u "$SERVICE_FILE" -n 20 --no-pager

@@ -20,9 +20,10 @@ from main import run_briefing, WINDOWS, LABELS, TZ, log
 
 try:
     from telegram import Update
-    from telegram.ext import Application, CommandHandler, ContextTypes
-except ImportError:
-    print("Error: Missing 'python-telegram-bot' library. Please run 'pip install python-telegram-bot'.")
+    from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
+    from anthropic import Anthropic
+except ImportError as e:
+    print(f"Error: Missing required dependency: {e}. Please run 'pip install python-telegram-bot anthropic'.")
     sys.exit(1)
 
 # ── Setup Logging ─────────────────────────────────────────────────────────────
@@ -161,6 +162,184 @@ async def lunch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daybreak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_briefing_on_demand(update, "daybreak")
 
+# ── Deep Chief of Staff Persona for Rey ───────────────────────────────────────
+LIVE_CHAT_SYSTEM_PROMPT = """You are "Rey", the AI Chief of Staff and Executive Intelligence Officer for Linh Trần (CFO of DDS Group, DDS Petro, and Van Ninh International Port).
+
+Your operating style is highly professional, concise, direct, and action-oriented. You exist to make Linh's life easier by summarizing details, tracking crucial timelines, and offering sharp executive guidance on business matters.
+
+Operating Domains & Core Context:
+1. Banking & Letters of Credit (LCs):
+   - Active relationships: BIDV, ACB, Shinhan, MB, VIB.
+   - Core instruments: LCs (Letters of Credit), UNCs (Ủy nhiệm chi), UPAS LCs, credit agreements, covenants.
+   - Priority: Monitor limits, interest rates, and fee structures.
+2. Petroleum Trading & Pricing:
+   - Pricing mechanisms: MOPS (Mean of Platts Singapore), Platts benchmarks, premium formulas.
+   - Key suppliers/partners: Vitol, BSR (Bình Sơn Refining / Dung Quất).
+   - Terms: Term contracts, spot cargoes, and offtake agreements (e.g., PVNDB terms).
+3. Van Ninh International Port:
+   - Infrastructure development, investment, construction milestones, concessions, berthing capacities, and regulatory/governmental filings.
+4. Group Operations:
+   - Vessel scheduling, marine logistics, customs clearance, port agent updates, loading/discharge windows.
+5. Investors & Board Relations:
+   - Financial reporting, presentation prep, investor queries, and board meeting follow-ups.
+6. Personal Admin & CFO Support:
+   - Linh's schedule, personal finance, subscriptions, and executive task tracking.
+
+Escalation & Flagging Rules (When discussing these, explicitly highlight or warn Linh immediately):
+- LC Expiry or Approaching Deadlines: Highlight any LC expiring in < 7 days or pending document submissions.
+- Covenant Breaches: Any indication of leverage, liquidity, or compliance ratio breaches.
+- Customs or Regulatory Holds: Immediate flag for port authority, customs, or tax office holds.
+- FX Rate Fluctuations: Flag if USD/VND or major relevant currency pairs move >1% within a single day.
+- Operational Delay: Vessel discharge or loading delay that incurs demurrage.
+
+Communication & Interaction Guidelines:
+- Language: Bilingual. Respond in the language used by the user (Vietnamese or English). If the user mixes them, use professional, high-level business Vietnamese/English blend (typical of multinational executives).
+- Style: Bullet-points, bold text for emphasis. Short and structured. No fluff, no generic pleasantries (e.g., "I hope this finds you well"). Start directly with the answer.
+- Confidentiality: NEVER leak sensitive financial figures, proprietary pricing formulas, or internal strategy in public Telegram groups. In group chats, keep answers high-level, strictly professional, and avoid detailing confidential data. If asked about highly confidential info in a group, advise Linh to discuss it in DMs. In DMs, you can speak fully and openly.
+- Rolling memory: You have access to the rolling chat history. Connect your answers to previous contexts if referenced.
+"""
+
+# ── Conversation Memory Store ────────────────────────────────────────────────
+# Stores rolling chat history per chat_id: chat_id -> list of {"role": "user"|"assistant", "content": "..."}
+chat_histories = {}
+
+def call_claude_messages(messages: list, system_prompt: str) -> str:
+    """Invokes Claude using the list of messages and system prompt."""
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise ValueError("ANTHROPIC_API_KEY environment variable is missing.")
+    
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
+    client = Anthropic(api_key=api_key)
+    
+    resp = client.messages.create(
+        model=model,
+        max_tokens=2048,
+        system=system_prompt,
+        messages=messages,
+    )
+    return resp.content[0].text
+
+async def reply_message_safe(update: Update, text: str):
+    """Sends text in chunks of <= 4000 chars to avoid Telegram message length limit."""
+    if len(text) <= 4000:
+        await update.message.reply_text(text)
+        return
+        
+    chunks, cur = [], ""
+    for para in text.split("\n\n"):
+        if len(cur) + len(para) + 2 > 4000:
+            chunks.append(cur)
+            cur = para
+        else:
+            cur = (cur + "\n\n" + para) if cur else para
+    if cur:
+        chunks.append(cur)
+        
+    for chunk in chunks:
+        await update.message.reply_text(chunk)
+
+async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    query = " ".join(context.args).strip()
+    if not query:
+        await update.message.reply_text("ℹ️ Please provide a question. Usage: `/ask <question>`", parse_mode="Markdown")
+        return
+        
+    await update.message.chat.send_action(action="typing")
+    
+    try:
+        response_text = await asyncio.to_thread(
+            call_claude_messages,
+            messages=[{"role": "user", "content": query}],
+            system_prompt=LIVE_CHAT_SYSTEM_PROMPT
+        )
+        await reply_message_safe(update, response_text)
+    except Exception as e:
+        logger.error(f"Error in /ask command: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    chat_id = update.effective_chat.id
+    chat_histories[chat_id] = []
+    await update.message.reply_text("🔄 Chat history has been reset for this chat.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    chat_type = update.effective_chat.type
+
+    # Authorization check
+    if not is_authorized(user_id):
+        # In DMs, respond with unauthorized. In groups, ignore completely to prevent spam.
+        if chat_type == "private":
+            await update.message.reply_text("❌ You are not authorized to use this bot.")
+        return
+
+    # Check response conditions
+    should_respond = False
+    if chat_type == "private":
+        should_respond = True
+    elif chat_type in ["group", "supergroup"]:
+        bot_username = context.bot.username
+        mention = f"@{bot_username}"
+        is_mention = mention in update.message.text
+        
+        is_reply_to_bot = False
+        if update.message.reply_to_message:
+            reply_to = update.message.reply_to_message
+            if reply_to.from_user and reply_to.from_user.id == context.bot.id:
+                is_reply_to_bot = True
+                
+        if is_mention or is_reply_to_bot:
+            should_respond = True
+
+    if not should_respond:
+        return
+
+    # Prepare message for Claude
+    raw_text = update.message.text
+    cleaned_text = raw_text
+    
+    # Strip bot mention if in group
+    if chat_type in ["group", "supergroup"]:
+        bot_username = context.bot.username
+        mention = f"@{bot_username}"
+        cleaned_text = raw_text.replace(mention, "").strip()
+
+    await update.message.chat.send_action(action="typing")
+    
+    if chat_id not in chat_histories:
+        chat_histories[chat_id] = []
+        
+    chat_histories[chat_id].append({"role": "user", "content": cleaned_text})
+    # Keep rolling context of last 20 turns (40 messages)
+    chat_histories[chat_id] = chat_histories[chat_id][-40:]
+    
+    try:
+        response_text = await asyncio.to_thread(
+            call_claude_messages,
+            messages=chat_histories[chat_id],
+            system_prompt=LIVE_CHAT_SYSTEM_PROMPT
+        )
+        chat_histories[chat_id].append({"role": "assistant", "content": response_text})
+        await reply_message_safe(update, response_text)
+    except Exception as e:
+        logger.error(f"Error handling message: {e}")
+        if chat_histories[chat_id]:
+            chat_histories[chat_id].pop() # Remove failed user message
+        await update.message.reply_text(f"❌ Error: {e}")
+
 # ── Scheduler background loop ─────────────────────────────────────────────────
 async def run_scheduled_briefing(bot, mode: str):
     """Utility to run and send scheduled briefing."""
@@ -255,6 +434,11 @@ async def main():
     application.add_handler(CommandHandler("morning", morning_cmd))
     application.add_handler(CommandHandler("lunch", lunch_cmd))
     application.add_handler(CommandHandler("daybreak", daybreak_cmd))
+    application.add_handler(CommandHandler("ask", ask_cmd))
+    application.add_handler(CommandHandler("reset", reset_cmd))
+    
+    # Add Message Handler for general conversations (non-command text)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
     # Start bot
     await application.initialize()
