@@ -1,8 +1,7 @@
-# AI Telegram Briefing Bot — Dependencies
-
-python-telegram-bot==21.6
-anthropic>=0.34.0
-python-dotenv>=1.0.0
-google-auth-oauthlib>=1.2.0
-google-api-python-client>=2.120.0
-requests>=2.31.0
+fastapi==0.136.3
+uvicorn[standard]==0.48.0
+sqlalchemy==2.0.50
+jinja2==3.1.6
+python-multipart==0.0.29
+bcrypt==5.0.0
+itsdangerous==2.2.0

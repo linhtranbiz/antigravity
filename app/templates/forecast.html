@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+{% block title %}Dự báo giá{% endblock %}
+{% block page_title %}Dự báo Giá Cơ Sở{% endblock %}
+{% block topbar_right %}Kỳ: <strong>{{ pub_date }}</strong> | {{ period_start }} – {{ period_end }}{% endblock %}
+
+{% block content %}
+{% set products = ["E5","X95","DO005","DO001"] %}
+{% set labels   = {"E5":"E5 RON 92","X95":"RON 95-III","DO005":"DO 0,05S","DO001":"DO 0,001S"} %}
+
+<!-- Status bar -->
+<div class="alert {% if confirmed_days == total_days %}alert-success{% else %}alert-warning{% endif %} py-2 mb-3 d-flex align-items-center gap-2">
+  <i class="bi bi-info-circle-fill"></i>
+  <span>
+    <strong>{{ confirmed_days }}/{{ total_days }}</strong> phiên Platts xác nhận
+    {% if confirmed_days < total_days %}
+    — Còn {{ total_days - confirmed_days }} ngày ước tính (flat = giá cuối cùng được nhập)
+    {% endif %}
+  </span>
+  {% if user.role == 'admin' and results %}
+  <form method="post" action="/forecast/save-ky" class="ms-auto">
+    <button type="submit" class="btn btn-sm {% if already_saved %}btn-outline-success{% else %}btn-success{% endif %}">
+      <i class="bi bi-floppy me-1"></i>
+      {% if already_saved %}Cập nhật lịch sử{% else %}Lưu kỳ này{% endif %}
+    </button>
+  </form>
+  {% endif %}
+</div>
+
+<!-- MOPS averages -->
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">
+    <i class="bi bi-table me-2"></i>Bình quân MOPS 7 ngày ($/bbl)
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-sm mb-0">
+      <thead class="table-light">
+        <tr>
+          <th>Sản phẩm</th>
+          <th class="text-end">BQ 7 ngày ($/bbl)</th>
+          <th class="text-end">Tỷ giá VCB bán</th>
+          <th class="text-end">Tỷ giá LNH</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for pk, label in [("X95","RON 95"),("X92","X92 (est.)"),("DO005","DO 0,05S"),("DO001","DO 0,001S")] %}
+        <tr>
+          <td>{{ label }}</td>
+          <td class="text-end font-monospace">{{ mops_avgs[pk] }}</td>
+          {% if loop.first %}
+          <td class="text-end font-monospace" rowspan="4">{{ "{:,}".format(params.vcb|int) }} VNĐ/USD</td>
+          <td class="text-end font-monospace" rowspan="4">{{ "{:,}".format(params.lnh|int) }} VNĐ/USD</td>
+          {% endif %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Waterfall table -->
+{% if results %}
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">
+    <i class="bi bi-layers me-2"></i>Cấu thành Giá Cơ Sở — Waterfall (VNĐ/lít)
+  </div>
+  <div class="card-body p-0 table-responsive">
+    <table class="table table-bordered table-hover mb-0 waterfall-table">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:200px">Khoản mục</th>
+          {% for pk in products %}
+          <th class="text-end">{{ labels[pk] }}</th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% set rows = [
+          ("Giá CIF (VNĐ/lít)",  "CIF",   ""),
+          ("+ Thuế NK",           "NK",    ""),
+          ("+ TTĐB (= 0%)",       "TTDB",  "text-muted"),
+          ("+ CP kinh doanh",     "CP_KD", ""),
+          ("+ LN định mức",       "LN",    ""),
+          ("+ Quỹ BOG",           "BOG",   "text-muted"),
+          ("+ BVMT (= 0)",        "BVMT",  "text-muted"),
+          ("+ VAT (= 0%)",        "VAT",   "text-muted"),
+        ] %}
+        {% for label, key, cls in rows %}
+        <tr class="{{ cls }}">
+          <td>{{ label }}</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">{{ "{:,}".format(results[pk][key]) }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr class="table-primary fw-bold fs-6">
+          <td>GIÁ CƠ SỞ DỰ BÁO</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">{{ "{:,}".format(results[pk].total) }}</td>
+          {% endfor %}
+        </tr>
+        {% if prev_results %}
+        <tr class="table-light small text-muted">
+          <td>Kỳ trước</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">
+            {% if prev_results[pk] is defined %}{{ "{:,}".format(prev_results[pk].total) }}{% else %}—{% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        <tr class="table-light small">
+          <td>Chênh lệch</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">
+            {% if prev_results[pk] is defined %}
+              {% set diff = results[pk].total - prev_results[pk].total %}
+              {% set pct  = (diff / prev_results[pk].total * 100)|round(2) %}
+              <span class="{% if diff > 0 %}text-danger{% elif diff < 0 %}text-success{% endif %}">
+                {{ "%+,d"|format(diff) }} ({{ "%+.2f"|format(pct) }}%)
+              </span>
+            {% else %}—{% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        {% endif %}
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+<!-- Sensitivity grid -->
+{% if sensitivity %}
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">
+    <i class="bi bi-grid me-2"></i>Sensitivity RON 95-III — Giá cơ sở (VNĐ/lít)
+    <small class="text-muted ms-2">MOPS avg ± $/bbl × Tỷ giá VCB ± VNĐ</small>
+  </div>
+  <div class="card-body p-0 table-responsive">
+    <table class="table table-sm table-bordered mb-0 sens-table text-center">
+      <thead class="table-light">
+        <tr>
+          <th class="text-start">VCB bán ↓ / MOPS →</th>
+          {% for m in sensitivity.mops_cols %}
+          <th>{{ m }}<br><small class="text-muted">$/bbl</small></th>
+          {% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% set base_price = results.X95.total %}
+        {% for row in sensitivity.rows %}
+        <tr {% if row.is_base %}class="table-active fw-semibold"{% endif %}>
+          <td class="text-start font-monospace">{{ "{:,}".format(row.vcb) }}</td>
+          {% for cell in row.cells %}
+          {% set diff_pct = ((cell.price - base_price) / base_price * 100) %}
+          <td class="font-monospace {% if cell.is_base %}text-primary fw-bold{% elif diff_pct > 2 %}text-danger{% elif diff_pct < -2 %}text-success{% endif %}">
+            {{ "{:,}".format(cell.price) }}
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+{% endif %}
+
+<!-- Rule of thumb -->
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">
+    <i class="bi bi-lightning me-2"></i>Rule of thumb — Tác động per $1/bbl MOPS
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      {% for pk, label in labels.items() %}
+      {% if rot[pk] is defined %}
+      <div class="col-6 col-md-3">
+        <div class="text-muted small">{{ label }}</div>
+        <div class="fw-bold fs-5">≈ {{ "{:,}".format(rot[pk]) }} <small class="text-muted fw-normal fs-6">VNĐ/lít</small></div>
+      </div>
+      {% endif %}
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% else %}
+<div class="alert alert-warning">
+  <i class="bi bi-exclamation-triangle me-2"></i>
+  Chưa có đủ dữ liệu MOPS để tính giá. <a href="/mops" class="alert-link">Nhập MOPS →</a>
+</div>
+{% endif %}
+{% endblock %}

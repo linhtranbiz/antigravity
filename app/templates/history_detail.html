@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+{% block title %}Chi tiết kỳ{{ ky.publication_date.strftime('%d/%m/%Y') }}{% endblock %}
+{% block page_title %}Chi tiết kỳ {{ ky.publication_date.strftime("%d/%m/%Y") }}{% endblock %}
+
+{% block content %}
+<div class="mb-3">
+  <a href="/history" class="btn btn-sm btn-outline-secondary">
+    <i class="bi bi-arrow-left me-1"></i>Quay lại lịch sử
+  </a>
+</div>
+
+<div class="alert alert-light border mb-3">
+  <strong>Kỳ công bố:</strong> {{ ky.publication_date.strftime("%d/%m/%Y") }} &nbsp;|&nbsp;
+  <strong>Chu kỳ MOPS:</strong> {{ ky.period_start.strftime("%d/%m") }} – {{ ky.period_end.strftime("%d/%m/%Y") }} &nbsp;|&nbsp;
+  <strong>VCB:</strong> {{ "{:,}".format(ky.vcb_rate|int) }} VNĐ/USD &nbsp;|&nbsp;
+  <strong>LNH:</strong> {{ "{:,}".format(ky.lnh_rate|int) }} VNĐ/USD
+</div>
+
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">MOPS Bình quân ($/bbl)</div>
+  <div class="card-body">
+    <div class="row g-3">
+      {% for k, v in avgs.items() %}
+      <div class="col-6 col-md-3">
+        <div class="text-muted small">{{ k }}</div>
+        <div class="fw-bold">{{ v }}</div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+
+{% set products = ["E5","X95","DO005","DO001"] %}
+{% set labels   = {"E5":"E5 RON 92","X95":"RON 95-III","DO005":"DO 0,05S","DO001":"DO 0,001S"} %}
+
+<div class="card">
+  <div class="card-header fw-semibold py-2">Waterfall (VNĐ/lít)</div>
+  <div class="card-body p-0 table-responsive">
+    <table class="table table-bordered mb-0">
+      <thead class="table-dark">
+        <tr>
+          <th>Khoản mục</th>
+          {% for pk in products %}<th class="text-end">{{ labels[pk] }}</th>{% endfor %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for lbl, key in [("Giá CIF","CIF"),("+ Thuế NK","NK"),("+ TTĐB","TTDB"),("+ CP KD","CP_KD"),("+ LN","LN"),("+ BOG","BOG"),("+ BVMT","BVMT"),("+ VAT","VAT")] %}
+        <tr>
+          <td>{{ lbl }}</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">{{ "{:,}".format(results[pk][key]) if results[pk] is defined else "—" }}</td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot>
+        <tr class="table-primary fw-bold">
+          <td>GIÁ CƠ SỞ</td>
+          {% for pk in products %}
+          <td class="text-end font-monospace">{{ "{:,}".format(results[pk].total) if results[pk] is defined else "—" }}</td>
+          {% endfor %}
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+{% endblock %}

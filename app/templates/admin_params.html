@@ -1,0 +1,124 @@
+{% extends "base.html" %}
+{% block title %}Thông số{% endblock %}
+{% block page_title %}Quản lý Thông số Công thức{% endblock %}
+
+{% block content %}
+<div class="alert alert-warning py-2 mb-3 small">
+  <i class="bi bi-exclamation-triangle me-2"></i>
+  Thay đổi thông số sẽ ảnh hưởng đến tất cả các tính toán từ kỳ tiếp theo. Ghi rõ nguồn văn bản khi cập nhật.
+</div>
+
+{% for group_name, keys in param_groups.items() %}
+<div class="card mb-3">
+  <div class="card-header fw-semibold py-2">
+    <i class="bi bi-sliders me-2"></i>{{ group_name }}
+  </div>
+  <div class="card-body">
+    {% for key in keys %}
+    {% if params_data[key] is defined %}
+    {% set p = params_data[key] %}
+    <div class="param-row mb-4 pb-3 border-bottom">
+      <div class="d-flex align-items-start gap-3 mb-2">
+        <div class="flex-grow-1">
+          <div class="fw-semibold">{{ p.desc }}</div>
+          <div class="small text-muted">
+            <code>{{ key }}</code> —
+            Cập nhật lần cuối: {{ p.updated_by }} lúc {{ p.updated_at }}
+          </div>
+        </div>
+      </div>
+
+      <div class="row g-2 align-items-end">
+        {% if p.is_scalar %}
+        <div class="col-md-3">
+          <label class="form-label small fw-semibold mb-1">Giá trị</label>
+          <input type="number" step="any" class="form-control form-control-sm font-monospace param-value"
+                 id="val-{{ key }}" value="{{ p.value }}" data-key="{{ key }}">
+        </div>
+        {% else %}
+        <!-- Dict parameter — show per-product inputs -->
+        <div class="col-12">
+          <div class="row g-2">
+            {% set sub_keys = ['X95','X92','E5','E5_R92','DO005','DO001'] %}
+            {% for sk in sub_keys %}
+            {% if p.value[sk] is defined %}
+            <div class="col-auto">
+              <label class="form-label small mb-1">{{ sk }}</label>
+              <input type="number" step="any"
+                     class="form-control form-control-sm font-monospace dict-param-value"
+                     style="width:100px"
+                     data-key="{{ key }}" data-subkey="{{ sk }}"
+                     value="{{ p.value[sk] }}">
+            </div>
+            {% endif %}
+            {% endfor %}
+          </div>
+        </div>
+        {% endif %}
+
+        <div class="col-md-4">
+          <label class="form-label small fw-semibold mb-1">Nguồn văn bản</label>
+          <input type="text" class="form-control form-control-sm param-src"
+                 id="src-{{ key }}" value="{{ p.src }}" data-key="{{ key }}"
+                 placeholder="VD: CV 4726/BTC-QLG 15/4/2026">
+        </div>
+        <div class="col-auto">
+          <button class="btn btn-sm btn-primary save-param-btn" data-key="{{ key }}"
+                  data-scalar="{{ p.is_scalar|lower }}">
+            <i class="bi bi-floppy me-1"></i>Lưu
+          </button>
+          <span class="save-status ms-2 small" id="status-{{ key }}"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+    {% endfor %}
+  </div>
+</div>
+{% endfor %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+document.querySelectorAll('.save-param-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const key    = btn.dataset.key;
+    const isScalar = btn.dataset.scalar === 'true';
+    const src    = document.getElementById('src-'+key)?.value || '';
+    const status = document.getElementById('status-'+key);
+
+    let value;
+    if (isScalar) {
+      value = parseFloat(document.getElementById('val-'+key).value);
+    } else {
+      // Collect dict sub-keys
+      const dictInputs = document.querySelectorAll(`.dict-param-value[data-key="${key}"]`);
+      value = {};
+      dictInputs.forEach(inp => {
+        value[inp.dataset.subkey] = parseFloat(inp.value);
+      });
+    }
+
+    try {
+      const res = await fetch('/admin/params/update', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({key, value, source_doc: src})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        status.textContent = '✓ Đã lưu';
+        status.className = 'save-status ms-2 small text-success';
+      } else {
+        status.textContent = '✗ Lỗi: ' + data.error;
+        status.className = 'save-status ms-2 small text-danger';
+      }
+    } catch(e) {
+      status.textContent = '✗ Lỗi kết nối';
+      status.className = 'save-status ms-2 small text-danger';
+    }
+    setTimeout(() => status.textContent = '', 4000);
+  });
+});
+</script>
+{% endblock %}

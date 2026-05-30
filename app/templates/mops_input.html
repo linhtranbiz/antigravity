@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}Nhập MOPS{% endblock %}
+{% block page_title %}Nhập MOPS Platts{% endblock %}
+{% block topbar_right %}Kỳ: <strong>{{ pub_date }}</strong>{% endblock %}
+
+{% block content %}
+<div class="alert alert-light border mb-3 d-flex align-items-center gap-2">
+  <i class="bi bi-info-circle text-primary fs-5"></i>
+  <div class="small">
+    Nhập giá Platts MOPS Singapore FOB Cargo ($/bbl). Nhấn <kbd>Tab</kbd> hoặc rời ô để lưu tự động.
+    <span class="badge bg-success ms-2">✓ Xác nhận Platts</span>
+    <span class="badge bg-warning text-dark ms-1">~ Ước tính</span>
+  </div>
+  <div class="ms-auto fw-semibold">
+    <span class="{% if confirmed_count == total_days %}text-success{% else %}text-warning{% endif %}">
+      {{ confirmed_count }}/{{ total_days }} xác nhận
+    </span>
+  </div>
+</div>
+
+<div class="card">
+  <div class="card-header fw-semibold">
+    <i class="bi bi-table me-2"></i>MOPS FOB Singapore ($/bbl) — Kỳ {{ pub_date }}
+  </div>
+  <div class="card-body p-0">
+    <table class="table table-bordered mb-0" id="mopsTable">
+      <thead class="table-dark">
+        <tr>
+          <th style="width:140px">Ngày</th>
+          <th style="width:60px" class="text-center">Thứ</th>
+          <th class="text-center">RON 95<br><small class="fw-normal text-muted">(X95)</small></th>
+          <th class="text-center">X92 (ước tính)<br><small class="fw-normal text-muted">= X95 − spread</small></th>
+          <th class="text-center">DO 0,05S<br><small class="fw-normal text-muted">(DO005)</small></th>
+          <th class="text-center">DO 0,001S<br><small class="fw-normal text-muted">(DO001)</small></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in day_rows %}
+        <tr id="row-{{ row.date }}" class="{% if row.is_past %}row-past{% endif %}">
+          <td class="fw-semibold align-middle">{{ row.date }}</td>
+          <td class="text-center align-middle text-muted">{{ row.weekday }}</td>
+
+          {% for prod in ['X95', 'DO005', 'DO001'] %}
+          <td class="text-center p-1">
+            <div class="d-flex align-items-center gap-1 justify-content-center">
+              <input type="number"
+                     class="form-control form-control-sm mops-input font-monospace text-end"
+                     style="width:100px"
+                     data-date="{{ row.date }}"
+                     data-product="{{ prod }}"
+                     value="{{ row[prod] if row[prod] is not none else '' }}"
+                     step="0.01" min="0" max="500"
+                     placeholder="—"
+                     {% if row['conf_' + prod] %}data-confirmed="1"{% endif %}>
+              <button class="btn btn-xs confirm-btn {% if row['conf_' + prod] %}btn-success{% else %}btn-outline-secondary{% endif %}"
+                      data-date="{{ row.date }}" data-product="{{ prod }}"
+                      title="Đánh dấu là Platts xác nhận">
+                <i class="bi {% if row['conf_' + prod] %}bi-check-circle-fill{% else %}bi-circle{% endif %}"></i>
+              </button>
+            </div>
+          </td>
+          {% endfor %}
+
+          <!-- X92 auto-calc column -->
+          <td class="text-center align-middle text-muted font-monospace" id="x92-{{ row.date }}">
+            {% if row.X95 %}<span>{{ "%.2f"|format(row.X95 - 2.106) }}</span>{% else %}—{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+      <tfoot class="table-light fw-semibold">
+        <tr>
+          <td colspan="2">Bình quân 7 ngày</td>
+          <td class="text-center font-monospace" id="avg-X95">—</td>
+          <td class="text-center font-monospace text-muted" id="avg-X92">—</td>
+          <td class="text-center font-monospace" id="avg-DO005">—</td>
+          <td class="text-center font-monospace" id="avg-DO001">—</td>
+        </tr>
+      </tfoot>
+    </table>
+  </div>
+</div>
+
+<div class="mt-3 d-flex gap-2">
+  <a href="/forecast" class="btn btn-primary">
+    <i class="bi bi-bar-chart-line me-1"></i>Xem dự báo giá →
+  </a>
+</div>
+
+<!-- Save status toast -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index:1100">
+  <div id="saveToast" class="toast align-items-center border-0" role="alert">
+    <div class="d-flex">
+      <div class="toast-body" id="toastMsg">Đã lưu</div>
+      <button type="button" class="btn-close me-2 m-auto" data-bs-dismiss="toast"></button>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const SPREAD = 2.106;
+const toast  = new bootstrap.Toast(document.getElementById('saveToast'), {delay: 2000});
+
+function showToast(msg, ok) {
+  const el = document.getElementById('saveToast');
+  el.className = 'toast align-items-center border-0 ' + (ok ? 'bg-success text-white' : 'bg-danger text-white');
+  document.getElementById('toastMsg').textContent = msg;
+  toast.show();
+}
+
+function computeAvgs() {
+  ['X95','DO005','DO001'].forEach(prod => {
+    const inputs = document.querySelectorAll(`.mops-input[data-product="${prod}"]`);
+    const vals = [...inputs].map(i => parseFloat(i.value)).filter(v => !isNaN(v));
+    const avg = vals.length ? (vals.reduce((a,b)=>a+b,0)/vals.length).toFixed(3) : '—';
+    document.getElementById('avg-'+prod).textContent = avg;
+    if (prod === 'X95') {
+      const avgX92 = vals.length ? (parseFloat(avg)-SPREAD).toFixed(3) : '—';
+      document.getElementById('avg-X92').textContent = avgX92;
+    }
+  });
+}
+
+function updateX92(dateStr, x95val) {
+  const cell = document.getElementById('x92-'+dateStr);
+  if (cell) {
+    const x92 = x95val ? (parseFloat(x95val)-SPREAD).toFixed(2) : '—';
+    cell.innerHTML = `<span>${x92}</span>`;
+  }
+}
+
+// Auto-save on blur
+document.querySelectorAll('.mops-input').forEach(input => {
+  input.addEventListener('blur', async () => {
+    const val = input.value.trim();
+    if (!val) return;
+    const d   = input.dataset.date;
+    const p   = input.dataset.product;
+    const confirmed = input.dataset.confirmed === '1';
+    try {
+      const res = await fetch('/mops/save', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({date:d, product:p, price:val, confirmed})
+      });
+      const data = await res.json();
+      if (data.ok) {
+        showToast(`Đã lưu ${p} ${d}`, true);
+        if (p === 'X95') updateX92(d, val);
+        computeAvgs();
+      } else {
+        showToast('Lỗi lưu: '+data.error, false);
+      }
+    } catch(e) { showToast('Lỗi kết nối', false); }
+  });
+});
+
+// Confirm button
+document.querySelectorAll('.confirm-btn').forEach(btn => {
+  btn.addEventListener('click', async () => {
+    const d = btn.dataset.date;
+    const p = btn.dataset.product;
+    const res = await fetch('/mops/confirm', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({date:d, product:p})
+    });
+    const data = await res.json();
+    if (data.ok) {
+      btn.className = 'btn btn-xs btn-success confirm-btn';
+      btn.innerHTML = '<i class="bi bi-check-circle-fill"></i>';
+      const inp = document.querySelector(`.mops-input[data-date="${d}"][data-product="${p}"]`);
+      if (inp) inp.dataset.confirmed = '1';
+      showToast(`Platts xác nhận ${p} ${d}`, true);
+    }
+  });
+});
+
+computeAvgs();
+</script>
+{% endblock %}

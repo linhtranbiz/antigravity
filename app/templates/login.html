@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Đăng nhập — MOIT Pricing</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link href="/static/style.css" rel="stylesheet">
+</head>
+<body class="login-body d-flex align-items-center justify-content-center min-vh-100">
+  <div class="login-card card shadow-lg p-4" style="width:360px">
+    <div class="text-center mb-4">
+      <div class="login-logo mb-2">
+        <i class="bi bi-fuel-pump-fill"></i>
+      </div>
+      <h4 class="fw-bold">MOIT Pricing</h4>
+      <p class="text-muted small">Nền tảng tính giá cơ sở xăng dầu</p>
+    </div>
+
+    {% for f in flashes %}
+    <div class="alert alert-{{ f.category }} py-2 small">{{ f.message }}</div>
+    {% endfor %}
+
+    <form method="post" action="/login">
+      <div class="mb-3">
+        <label class="form-label fw-semibold">Tên đăng nhập</label>
+        <div class="input-group">
+          <span class="input-group-text"><i class="bi bi-person"></i></span>
+          <input type="text" name="username" class="form-control" placeholder="admin" required autofocus>
+        </div>
+      </div>
+      <div class="mb-4">
+        <label class="form-label fw-semibold">Mật khẩu</label>
+        <div class="input-group">
+          <span class="input-group-text"><i class="bi bi-lock"></i></span>
+          <input type="password" name="password" class="form-control" required>
+        </div>
+      </div>
+      <button type="submit" class="btn btn-primary w-100 fw-semibold">
+        <i class="bi bi-box-arrow-in-right me-2"></i>Đăng nhập
+      </button>
+    </form>
+
+    <p class="text-center text-muted mt-3 small">
+      PKD — Phòng Kinh doanh Xăng dầu
+    </p>
+  </div>
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>
