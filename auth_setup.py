@@ -16,8 +16,8 @@ except ImportError:
     print("  pip install google-auth-oauthlib google-api-python-client")
     sys.exit(1)
 
-# Gmail readonly scope
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+# Gmail and Calendar readonly scopes
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.readonly']
 
 def main():
     if not os.path.exists('credentials.json'):

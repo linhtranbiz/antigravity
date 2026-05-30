@@ -17,11 +17,11 @@ ROOT = Path(__file__).parent
 sys.path.append(str(ROOT))
 
 from main import run_briefing, WINDOWS, LABELS, TZ, log
+from chat import call_claude_with_tools
 
 try:
     from telegram import Update
     from telegram.ext import Application, CommandHandler, MessageHandler, ContextTypes, filters
-    from anthropic import Anthropic
 except ImportError as e:
     print(f"Error: Missing required dependency: {e}. Please run 'pip install python-telegram-bot anthropic'.")
     sys.exit(1)
@@ -162,63 +162,9 @@ async def lunch_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def daybreak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await run_briefing_on_demand(update, "daybreak")
 
-# ── Deep Chief of Staff Persona for Rey ───────────────────────────────────────
-LIVE_CHAT_SYSTEM_PROMPT = """You are "Rey", the AI Chief of Staff and Executive Intelligence Officer for Linh Trần (CFO of DDS Group, DDS Petro, and Van Ninh International Port).
-
-Your operating style is highly professional, concise, direct, and action-oriented. You exist to make Linh's life easier by summarizing details, tracking crucial timelines, and offering sharp executive guidance on business matters.
-
-Operating Domains & Core Context:
-1. Banking & Letters of Credit (LCs):
-   - Active relationships: BIDV, ACB, Shinhan, MB, VIB.
-   - Core instruments: LCs (Letters of Credit), UNCs (Ủy nhiệm chi), UPAS LCs, credit agreements, covenants.
-   - Priority: Monitor limits, interest rates, and fee structures.
-2. Petroleum Trading & Pricing:
-   - Pricing mechanisms: MOPS (Mean of Platts Singapore), Platts benchmarks, premium formulas.
-   - Key suppliers/partners: Vitol, BSR (Bình Sơn Refining / Dung Quất).
-   - Terms: Term contracts, spot cargoes, and offtake agreements (e.g., PVNDB terms).
-3. Van Ninh International Port:
-   - Infrastructure development, investment, construction milestones, concessions, berthing capacities, and regulatory/governmental filings.
-4. Group Operations:
-   - Vessel scheduling, marine logistics, customs clearance, port agent updates, loading/discharge windows.
-5. Investors & Board Relations:
-   - Financial reporting, presentation prep, investor queries, and board meeting follow-ups.
-6. Personal Admin & CFO Support:
-   - Linh's schedule, personal finance, subscriptions, and executive task tracking.
-
-Escalation & Flagging Rules (When discussing these, explicitly highlight or warn Linh immediately):
-- LC Expiry or Approaching Deadlines: Highlight any LC expiring in < 7 days or pending document submissions.
-- Covenant Breaches: Any indication of leverage, liquidity, or compliance ratio breaches.
-- Customs or Regulatory Holds: Immediate flag for port authority, customs, or tax office holds.
-- FX Rate Fluctuations: Flag if USD/VND or major relevant currency pairs move >1% within a single day.
-- Operational Delay: Vessel discharge or loading delay that incurs demurrage.
-
-Communication & Interaction Guidelines:
-- Language: Bilingual. Respond in the language used by the user (Vietnamese or English). If the user mixes them, use professional, high-level business Vietnamese/English blend (typical of multinational executives).
-- Style: Bullet-points, bold text for emphasis. Short and structured. No fluff, no generic pleasantries (e.g., "I hope this finds you well"). Start directly with the answer.
-- Confidentiality: NEVER leak sensitive financial figures, proprietary pricing formulas, or internal strategy in public Telegram groups. In group chats, keep answers high-level, strictly professional, and avoid detailing confidential data. If asked about highly confidential info in a group, advise Linh to discuss it in DMs. In DMs, you can speak fully and openly.
-- Rolling memory: You have access to the rolling chat history. Connect your answers to previous contexts if referenced.
-"""
-
 # ── Conversation Memory Store ────────────────────────────────────────────────
 # Stores rolling chat history per chat_id: chat_id -> list of {"role": "user"|"assistant", "content": "..."}
 chat_histories = {}
-
-def call_claude_messages(messages: list, system_prompt: str) -> str:
-    """Invokes Claude using the list of messages and system prompt."""
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        raise ValueError("ANTHROPIC_API_KEY environment variable is missing.")
-    
-    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-    client = Anthropic(api_key=api_key)
-    
-    resp = client.messages.create(
-        model=model,
-        max_tokens=2048,
-        system=system_prompt,
-        messages=messages,
-    )
-    return resp.content[0].text
 
 async def reply_message_safe(update: Update, text: str):
     """Sends text in chunks of <= 4000 chars to avoid Telegram message length limit."""
@@ -252,10 +198,11 @@ async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.chat.send_action(action="typing")
     
     try:
+        # One-shot history that is not saved to global memory
+        one_shot_history = [{"role": "user", "content": query}]
         response_text = await asyncio.to_thread(
-            call_claude_messages,
-            messages=[{"role": "user", "content": query}],
-            system_prompt=LIVE_CHAT_SYSTEM_PROMPT
+            call_claude_with_tools,
+            messages=one_shot_history
         )
         await reply_message_safe(update, response_text)
     except Exception as e:
@@ -328,15 +275,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     try:
         response_text = await asyncio.to_thread(
-            call_claude_messages,
-            messages=chat_histories[chat_id],
-            system_prompt=LIVE_CHAT_SYSTEM_PROMPT
+            call_claude_with_tools,
+            messages=chat_histories[chat_id]
         )
-        chat_histories[chat_id].append({"role": "assistant", "content": response_text})
+        chat_histories[chat_id] = chat_histories[chat_id][-40:]
         await reply_message_safe(update, response_text)
     except Exception as e:
         logger.error(f"Error handling message: {e}")
-        if chat_histories[chat_id]:
+        if chat_histories[chat_id] and chat_histories[chat_id][-1]["role"] == "user":
             chat_histories[chat_id].pop() # Remove failed user message
         await update.message.reply_text(f"❌ Error: {e}")
 

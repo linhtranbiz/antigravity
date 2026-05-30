@@ -121,7 +121,8 @@ for name, t in times:
         break
 if not next_brief:
     next_brief = (times[0][0], times[0][1] + dt.timedelta(days=1))
-print(f"\033[1;32m★ Next Scheduled Briefing: {next_brief[0]} at {next_brief[1].strftime(\"%Y-%m-%d %H:%M:%S %Z\")}\033[0m")
+date_str = next_brief[1].strftime("%Y-%m-%d %H:%M:%S %Z")
+print(f"\033[1;32m★ Next Scheduled Briefing: {next_brief[0]} at {date_str}\033[0m")
 '
 else
   echo -e "${RED}❌ ERROR: Service failed to start. Printing systemd logs:${NC}"

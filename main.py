@@ -30,8 +30,8 @@ load_dotenv(ROOT / ".env")
 
 TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# Gmail Readonly Scope
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+# Gmail and Calendar readonly scopes
+SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.readonly']
 
 # 7:30 Morning / 11:30 Lunch / 16:00 Daybreak (upgraded scheduling)
 WINDOWS = {
