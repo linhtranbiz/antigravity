@@ -327,7 +327,7 @@ Rules:
 - No emojis beyond the spec above."""
 
 def call_claude(emails, window_start, window_end, mode):
-    model = os.environ.get("CLAUDE_MODEL", "claude-3-5-sonnet-20241022")
+    model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
     # For compatibility, if the old model name was hardcoded, let's allow it
     if model == "claude-haiku-4-5-20251001":
          model = "claude-haiku-4-5-20251001"
