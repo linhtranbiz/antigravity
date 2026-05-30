@@ -10,6 +10,10 @@ import base64
 import requests
 import smtplib
 import datetime as dt
+import ssl
+import imaplib
+import email
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from email.mime.text import MIMEText
 from email.header import decode_header, make_header
@@ -150,6 +154,86 @@ def fetch_emails(service, window_start, window_end, mode):
             log(f"Failed to fetch/parse message {mid}: {e}", mode)
             
     log(f"Matched {len(emails)} emails exactly within window", mode)
+    return emails
+
+def decode_mime_header(s):
+    if not s: return ""
+    try: return str(make_header(decode_header(s)))
+    except Exception: return s
+
+def fetch_emails_imap(window_start, window_end, mode):
+    """Fetch emails from Gmail via IMAP as a fallback."""
+    user = os.environ.get("GMAIL_USER")
+    pwd  = os.environ.get("GMAIL_APP_PASSWORD")
+    if not user or not pwd:
+        raise ValueError("GMAIL_USER and GMAIL_APP_PASSWORD environment variables are required for IMAP fallback.")
+        
+    log(f"Falling back to Gmail IMAP retrieval...", mode)
+    ctx = ssl.create_default_context()
+    m = imaplib.IMAP4_SSL("imap.gmail.com", ssl_context=ctx)
+    m.login(user, pwd)
+    m.select('"[Gmail]/All Mail"', readonly=True)
+    since = (window_start - dt.timedelta(days=1)).strftime("%d-%b-%Y")
+    typ, data = m.search(None, f'(SINCE {since})')
+    ids = data[0].split()
+    log(f"IMAP returned {len(ids)} candidate messages since {since}", mode)
+    matched = []
+    
+    # Check the last 500 headers for matches
+    for mid in ids[-500:]:
+        try:
+            typ, hdr_data = m.fetch(mid, "(RFC822.HEADER)")
+            if typ != "OK": continue
+            hdr_bytes = next((p[1] for p in hdr_data if isinstance(p, tuple)), None)
+            if not hdr_bytes: continue
+            hdr_msg = email.message_from_bytes(hdr_bytes)
+            try:
+                mdate = parsedate_to_datetime(hdr_msg["Date"])
+                if mdate.tzinfo is None: mdate = mdate.replace(tzinfo=dt.timezone.utc)
+                mdate = mdate.astimezone(TZ)
+            except Exception:
+                continue
+            if window_start <= mdate <= window_end:
+                matched.append((mid, mdate, hdr_msg))
+        except Exception as e:
+            log(f"Failed to check header for IMAP message {mid}: {e}", mode)
+            
+    log(f"Matched {len(matched)} emails in window (IMAP)", mode)
+    emails = []
+    for mid, mdate, hdr_msg in matched:
+        try:
+            typ, full_data = m.fetch(mid, "(RFC822)")
+            body = ""
+            if typ == "OK":
+                full_bytes = next((p[1] for p in full_data if isinstance(p, tuple)), b"")
+                try:
+                    full_msg = email.message_from_bytes(full_bytes)
+                    if full_msg.is_multipart():
+                        for part in full_msg.walk():
+                            if part.get_content_type() == "text/plain":
+                                payload = part.get_payload(decode=True)
+                                if payload:
+                                    body = payload.decode("utf-8", errors="replace")[:3000]
+                                    break
+                    else:
+                        payload = full_msg.get_payload(decode=True)
+                        if payload:
+                            body = payload.decode("utf-8", errors="replace")[:3000]
+                except Exception as e:
+                    log(f"IMAP body parse err: {e}", mode)
+            emails.append({
+                "date": mdate.isoformat(),
+                "from": decode_mime_header(hdr_msg.get("From", "")),
+                "to": decode_mime_header(hdr_msg.get("To", "")),
+                "delivered_to": decode_mime_header(hdr_msg.get("Delivered-To", "")),
+                "subject": decode_mime_header(hdr_msg.get("Subject", "")),
+                "snippet": body[:1500],
+            })
+        except Exception as e:
+            log(f"Failed to fetch full IMAP message {mid}: {e}", mode)
+            
+    m.logout()
+    log(f"Fetched bodies for {len(emails)} emails (IMAP)", mode)
     return emails
 
 def build_prompt(emails, window_start, window_end, mode):
@@ -325,8 +409,26 @@ def run_briefing(mode="morning", dry_run=False):
     win_start, win_end = WINDOWS[mode][2](now)
     log(f"=== START {mode} brief, window {win_start} → {win_end} ===", mode)
     
-    service = get_gmail_service()
-    emails = fetch_emails(service, win_start, win_end, mode)
+    token_path = ROOT / "token.json"
+    use_oauth = token_path.exists()
+    
+    if use_oauth:
+        log("Using Gmail API OAuth flow...", mode)
+        try:
+            service = get_gmail_service()
+            emails = fetch_emails(service, win_start, win_end, mode)
+        except Exception as e:
+            log(f"Gmail API OAuth run failed: {e}. Checking IMAP fallback...", mode)
+            if os.environ.get("GMAIL_APP_PASSWORD"):
+                emails = fetch_emails_imap(win_start, win_end, mode)
+            else:
+                raise e
+    else:
+        log("Gmail token.json not found. Checking IMAP fallback...", mode)
+        if os.environ.get("GMAIL_APP_PASSWORD"):
+            emails = fetch_emails_imap(win_start, win_end, mode)
+        else:
+            raise FileNotFoundError("Neither token.json (Gmail OAuth) nor GMAIL_APP_PASSWORD (IMAP) was configured.")
     
     if not emails:
         msg = f"📬 *{LABELS[mode]} — {now.strftime('%Y-%m-%d %H:%M')} (+07)*\nWindow: {win_start.strftime('%H:%M')} → {win_end.strftime('%H:%M')}\n\nNo emails matching requirements in this window."
