@@ -1,0 +1,20 @@
+# Environment files
+.env
+
+# Credentials and tokens
+token.json
+credentials.json
+rey_tran_bot (linhtran.biz).json
+*.json
+
+# Allow credentials template if any
+!credentials.json.template
+
+# Python environment and caches
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local logs
+logs/
