@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """DDS Email Intelligence Briefing — Gmail API OAuth Version.
 
-Usage: main.py [--mode {morning|lunch|daybreak}] [--dry-run]
+Usage: main.py [--mode {morning|lunch|wrapup}] [--dry-run]
 """
 import os
 import sys
@@ -33,13 +33,17 @@ TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 # Gmail and Calendar readonly scopes
 SCOPES = ['https://www.googleapis.com/auth/gmail.readonly', 'https://www.googleapis.com/auth/calendar.readonly']
 
-# 7:30 Morning / 11:30 Lunch / 16:00 Daybreak (upgraded scheduling)
+# 7:30 Morning / 11:30 Lunch / 17:00 Wrap-Up (upgraded scheduling)
 WINDOWS = {
     "morning":  ("16:00 yesterday", "07:30 today", lambda n: (n.replace(hour=16, minute=0, second=0, microsecond=0) - dt.timedelta(days=1), n.replace(hour=7, minute=30, second=0, microsecond=0))),
     "lunch":    ("07:30 today",     "11:30 today", lambda n: (n.replace(hour=7,  minute=30, second=0, microsecond=0), n.replace(hour=11, minute=30, second=0, microsecond=0))),
-    "daybreak": ("11:30 today",     "16:00 today", lambda n: (n.replace(hour=11, minute=30, second=0, microsecond=0), n.replace(hour=16, minute=0, second=0, microsecond=0))),
+    "wrapup":   ("11:30 today",     "17:00 today", lambda n: (n.replace(hour=11, minute=30, second=0, microsecond=0), n.replace(hour=17, minute=0, second=0, microsecond=0))),
 }
-LABELS = {"morning": "📬 Morning Brief", "lunch": "📬 Lunch Brief", "daybreak": "📬 Day Break Brief"}
+LABELS = {
+    "morning": "📬 Morning Command Briefing",
+    "lunch": "📬 Midday Execution Check",
+    "wrapup": "📬 End-of-Day Wrap-Up"
+}
 
 def log(msg, mode="sys"):
     ts = dt.datetime.now(TZ).strftime("%Y-%m-%d %H:%M:%S")
@@ -236,35 +240,93 @@ def fetch_emails_imap(window_start, window_end, mode):
     log(f"Fetched bodies for {len(emails)} emails (IMAP)", mode)
     return emails
 
-def build_prompt(emails, window_start, window_end, mode):
+def format_calendar_events(events):
+    """Format calendar events for prompt inclusion."""
+    if not events:
+        return "(no calendar events in window)"
+    
+    lines = []
+    for e in events:
+        start_str = e.get('start', '')
+        end_str = e.get('end', '')
+        try:
+            if "T" in start_str:
+                st = dt.datetime.fromisoformat(start_str)
+                et = dt.datetime.fromisoformat(end_str)
+                time_range = f"{st.strftime('%H:%M')} - {et.strftime('%H:%M')}"
+            else:
+                time_range = "All Day"
+        except Exception:
+            time_range = f"{start_str} - {end_str}"
+            
+        loc_str = f" @ {e['location']}" if e.get('location') else ""
+        lines.append(f"- [{time_range}] {e.get('summary', '(No Title)')}{loc_str}")
+        if e.get('description'):
+            desc = e['description'].strip().replace('\n', ' ')
+            if len(desc) > 100:
+                desc = desc[:97] + "..."
+            lines.append(f"  Desc: {desc}")
+    return "\n".join(lines)
+
+def get_calendar_window(now, mode):
+    """Determine the appropriate calendar search window based on the briefing mode."""
+    if mode == "morning":
+        # Today's events: from start of today to end of today
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    elif mode == "lunch":
+        # Rest of today: from now (11:30) to end of today
+        start = now.replace(hour=11, minute=30, second=0, microsecond=0)
+        end = now.replace(hour=23, minute=59, second=59, microsecond=0)
+    else:  # wrapup
+        # Tomorrow's events: from start of tomorrow to end of tomorrow
+        tomorrow = now + dt.timedelta(days=1)
+        start = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = tomorrow.replace(hour=23, minute=59, second=59, microsecond=0)
+    return start, end
+
+def build_prompt(emails, calendar_events, window_start, window_end, mode, cal_start, cal_end):
     """Build the user prompt to send to Claude."""
     email_block = "\n\n---\n\n".join(
         f"DATE: {e['date']}\nFROM: {e['from']}\nDELIVERED-TO: {e['delivered_to']}\nSUBJECT: {e['subject']}\nBODY:\n{e['snippet']}"
         for e in emails
     ) or "(no emails in window)"
-    return f"""TIME WINDOW: {window_start.strftime('%Y-%m-%d %H:%M %Z')} → {window_end.strftime('%Y-%m-%d %H:%M %Z')}
+    
+    cal_block = format_calendar_events(calendar_events)
+    
+    return f"""TIME WINDOW FOR EMAILS: {window_start.strftime('%Y-%m-%d %H:%M %Z')} → {window_end.strftime('%Y-%m-%d %H:%M %Z')}
+TIME WINDOW FOR CALENDAR: {cal_start.strftime('%Y-%m-%d %H:%M %Z')} → {cal_end.strftime('%Y-%m-%d %H:%M %Z')}
 MODE: {mode.upper()}
 TOTAL EMAILS: {len(emails)}
+
+CALENDAR EVENTS:
+{cal_block}
 
 EMAILS:
 {email_block}
 
 Produce the briefing now."""
 
-SYSTEM_PROMPT = """You are the Executive Intelligence Officer for Linh Trần (CFO, DDS Group / DDS Petro / Van Ninh International Port).
+BASE_SYSTEM_PROMPT = """You are the Executive Intelligence Officer for Linh Trần (CFO, DDS Group / DDS Petro / Van Ninh International Port).
+Your tone is direct, executive, practical, and highly professional. Use bilingual formatting where appropriate: plain Vietnamese where helpful but commercial English for action verbs. Address Linh Trần as "Anh Linh".
 
-Triage every email into one of: 🔴 CRITICAL (act <2h) / 🟠 URGENT (today) / 🟡 IMPORTANT / 🔵 INFORMATIONAL / ⚪ LOW.
+Operating Domains & Core Context:
+1. Banking & Letters of Credit (LCs): Active relationships: BIDV, ACB, Shinhan, MB, VIB. Core instruments: LCs, UNCs, UPAS LCs, credit agreements, covenants. Priority: Monitor limits, interest rates, and fee structures.
+2. Petroleum Trading & Pricing: Pricing mechanisms: MOPS, Platts benchmarks, premium formulas. Key suppliers/partners: Vitol, BSR. Terms: Term contracts, spot cargoes, and offtake agreements (PVNDB terms).
+3. Van Ninh International Port: Infrastructure development, investment, construction milestones, concessions, berthing capacities, and regulatory/governmental filings.
+4. Group Operations: Vessel scheduling, marine logistics, customs clearance, port agent updates, loading/discharge windows.
 
+EMAIL TRIAGE RULES:
+Triage every email into: 🔴 CRITICAL (act <2h) / 🟠 URGENT (today) / 🟡 IMPORTANT / 🔵 INFORMATIONAL / ⚪ LOW.
 Tag domain: [BANKING] [PETROLEUM] [PORT] [FX] [LEGAL] [GOVERNMENT] [INTERNAL] [INVESTOR] [SUPPLIER] [ADMIN] [OTHER].
-
 Detect source mailbox from Delivered-To header. Mailboxes that forward to linhtran.business@gmail.com:
-- linh.tran@duongdong.com.vn (Executive)
-- finance@duongdong.com.vn (Finance & Treasury)
-- trading@duongdong.com.vn (Trading)
-- operations@duongdong.com.vn (Operations)
-- purchasing@duongdong.com.vn (Purchasing)
-- sales@duongdong.com.vn (Sales)
-Tag each item with src:<mailbox-shortname>-dds.
+- linh.tran@duongdong.com.vn (Executive) -> src:executive-dds
+- finance@duongdong.com.vn (Finance & Treasury) -> src:finance-dds
+- trading@duongdong.com.vn (Trading) -> src:trading-dds
+- operations@duongdong.com.vn (Operations) -> src:ops-dds
+- purchasing@duongdong.com.vn (Purchasing) -> src:purchasing-dds
+- sales@duongdong.com.vn (Sales) -> src:sales-dds
+Tag each item with its source mailbox.
 
 DEPARTMENT GROUPING — within each priority tier sub-group by:
 🏛️ Executive | 💰 Finance & Treasury | 📊 Trading | 🛢️ Operations | 🛒 Purchasing | 💼 Sales | ⚖️ Legal | 🏗️ Port / Van Ninh | 👥 HR/Admin | 🧾 Personal
@@ -282,53 +344,81 @@ Mapping rules:
 - personal banking/subscriptions → Personal
 
 Auto-priority boost: finance-dds LC/payment → CRITICAL; purchasing-dds cargo/draft LC → URGENT; ops-dds vessel/berthing → URGENT; trading-dds MOPS/Vitol/BSR pricing → URGENT.
+Never miss LC expiry/payment demand/bank covenant -> always CRITICAL. Always include Required Action on CRITICAL & URGENT.
+Exclude pure marketing/newsletter unless financial market alert.
+"""
 
-OUTPUT FORMAT (Telegram-Markdown compatible, no HTML):
+MORNING_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + """
+You are generating Linh Tran's Morning Command Briefing.
+Goal: Produce a concise executive briefing summarizing both calendar events and key emails for today to set priorities and highlight risks.
 
-📬 *[MODE NAME] — YYYY-MM-DD HH:MM (+07)*
-Window: <start> → <end>
-Total: N emails | Action items: N
+Output format (Telegram-Markdown compatible, no HTML, max 4000 characters):
+Anh Linh, đây là briefing hiện tại:
 
-🔴 *CRITICAL — Act <2h*
-[group by department; for each item:]
+## 1. Priority Today
+[List today's top 5 priorities for today, and highlight any important meetings/calls from calendar events with their times]
+
+## 2. Missing / Overdue
+[List any urgent deadlines, tasks, or pending things that need immediate tracking]
+
+## 3. Follow-up Needed
+[Present critical/urgent items grouped by department. Use format:
 • [DOMAIN][src:X-dds] *From:* sender | *Subject:* subject
-  → Summary: 1–2 sentence plain-language
+  → Summary: 1–2 sentence plain-language summary
   → Action: specific action for Linh
-  → Deadline: if any
+  → Deadline: if any]
 
-🟠 *URGENT — Today*
-[same grouped format]
+## 4. Decisions Required
+[List other emails and follow-ups requiring decision or reply, categorized briefly]
 
-🟡 *IMPORTANT*
-[compact: one line per item with department prefix]
+## 5. Suggested Next Actions
+[List a recommended sequence of execution (1., 2., 3...) and personal/life tasks. Close with a short strategic reminder for the day]
+"""
 
-🔵 *INFO* — short comma-separated list
-⚪ *LOW* — short comma-separated list
+LUNCH_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + """
+You are generating Linh Tran's Midday Execution Check.
+Goal: Compare morning's expected trajectory against current status, showing what should be done, what is still missing, and urgent items before lunch.
 
-📂 *BY DEPARTMENT*
-🏛️ Executive: X CRITICAL, Y URGENT, Z IMPORTANT
-💰 Finance & Treasury: ...
-[etc — only departments with items]
+Output format (Telegram-Markdown compatible, no HTML, max 4000 characters):
+Anh Linh, đây là Midday Execution Check:
 
-📊 *TOP 3 RIGHT NOW*
-1. ...
-2. ...
-3. ...
+## 1. Execution Check
+- What should already be done by now.
+- What is still missing or requires immediate follow-up before lunch.
 
-_Threads to watch:_ ...
-_Carry-over from previous briefing:_ (if lunch/daybreak)
+## 2. Critical & Urgent (Since Morning)
+[List any new emails/alerts that arrived since morning, using the standard format:
+• [DOMAIN][src:X-dds] *From:* sender | *Subject:* subject
+  → Summary: ...
+  → Action: ...
+  → Deadline: ...]
 
-Rules:
-- Exclude pure marketing/newsletter unless financial market alert.
-- Never miss LC expiry/payment demand/bank covenant → always CRITICAL.
-- Always include Required Action on CRITICAL & URGENT.
-- Keep total under 4000 chars when possible (Telegram limit 4096); split on department/section boundaries if exceeds.
-- Use plain Vietnamese where helpful but commercial English for action verbs.
-- No emojis beyond the spec above."""
+## 3. Upcoming Schedule & Next Actions
+- Calendar meetings for the afternoon/evening.
+- Suggested 3 priorities for the next 4 hours.
+"""
 
-def call_claude(emails, window_start, window_end, mode):
+WRAPUP_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT + """
+You are generating Linh Tran's End-of-Day Wrap-Up.
+Goal: Review today's task list, email status, calendar, and decisions to produce a summary of achievements, pending decisions, and priorities for tomorrow.
+
+Output format (Telegram-Markdown compatible, no HTML, max 4000 characters):
+Anh Linh, đây là End-of-Day Wrap-Up:
+
+## 1. Today's Summary
+- Completed items and decisions made today.
+- Missing or overdue items/decisions still pending.
+
+## 2. Follow-up Needed (Before EOD)
+[List critical follow-ups that must be sent before the day ends, plus draft short messages if helpful]
+
+## 3. Priorities & Schedule for Tomorrow
+- Suggested top priorities for tomorrow.
+- Highlight tomorrow's scheduled calendar events.
+"""
+
+def call_claude(emails, calendar_events, window_start, window_end, mode, cal_start, cal_end):
     model = os.environ.get("CLAUDE_MODEL", "claude-haiku-4-5-20251001")
-    # For compatibility, if the old model name was hardcoded, let's allow it
     if model == "claude-haiku-4-5-20251001":
          model = "claude-haiku-4-5-20251001"
     
@@ -337,13 +427,20 @@ def call_claude(emails, window_start, window_end, mode):
         raise ValueError("ANTHROPIC_API_KEY environment variable is missing.")
         
     client = Anthropic(api_key=api_key)
-    log(f"Calling Anthropic ({model}) with {len(emails)} emails", mode)
+    log(f"Calling Anthropic ({model}) with {len(emails)} emails and {len(calendar_events)} calendar events", mode)
+    
+    system_prompts = {
+        "morning": MORNING_SYSTEM_PROMPT,
+        "lunch": LUNCH_SYSTEM_PROMPT,
+        "wrapup": WRAPUP_SYSTEM_PROMPT
+    }
+    sys_prompt = system_prompts.get(mode, BASE_SYSTEM_PROMPT)
     
     resp = client.messages.create(
         model=model,
         max_tokens=4096,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": build_prompt(emails, window_start, window_end, mode)}],
+        system=sys_prompt,
+        messages=[{"role": "user", "content": build_prompt(emails, calendar_events, window_start, window_end, mode, cal_start, cal_end)}],
     )
     text = resp.content[0].text
     log(f"Claude returned {len(text)} chars", mode)
@@ -430,16 +527,33 @@ def run_briefing(mode="morning", dry_run=False):
         else:
             raise FileNotFoundError("Neither token.json (Gmail OAuth) nor GMAIL_APP_PASSWORD (IMAP) was configured.")
     
-    if not emails:
-        msg = f"📬 *{LABELS[mode]} — {now.strftime('%Y-%m-%d %H:%M')} (+07)*\nWindow: {win_start.strftime('%H:%M')} → {win_end.strftime('%H:%M')}\n\nNo emails matching requirements in this window."
+    # Fetch calendar events
+    calendar_events = []
+    cal_start, cal_end = get_calendar_window(now, mode)
+    if use_oauth:
+        try:
+            from calendar_client import list_calendar_events
+            log(f"Fetching calendar events from {cal_start.isoformat()} to {cal_end.isoformat()}...", mode)
+            events = list_calendar_events(cal_start.isoformat(), cal_end.isoformat())
+            if isinstance(events, list):
+                calendar_events = events
+                log(f"Successfully fetched {len(calendar_events)} calendar events", mode)
+            else:
+                log(f"Failed to fetch calendar events: {events}", mode)
+        except Exception as e:
+            log(f"Calendar fetching skipped or failed: {e}", mode)
+    else:
+        log("OAuth token.json not found. Skipping Google Calendar retrieval.", mode)
+        
+    if not emails and not calendar_events:
+        msg = f"📬 *{LABELS[mode]} — {now.strftime('%Y-%m-%d %H:%M')} (+07)*\nWindow: {win_start.strftime('%H:%M')} → {win_end.strftime('%H:%M')}\n\nNo emails or calendar events matching requirements in this window."
         if not dry_run:
             send_telegram(msg, mode)
-            # Archival send is optional when there's no mail, but let's keep consistency
             send_gmail_draft(msg, win_start, mode)
-        log("No emails to process. Briefing generated with empty message.", mode)
+        log("No emails or calendar events to process. Briefing generated with empty message.", mode)
         return msg
         
-    brief = call_claude(emails, win_start, win_end, mode)
+    brief = call_claude(emails, calendar_events, win_start, win_end, mode, cal_start, cal_end)
     
     if not dry_run:
         send_telegram(brief, mode)
@@ -452,12 +566,16 @@ def run_briefing(mode="morning", dry_run=False):
 
 def main():
     parser = argparse.ArgumentParser(description="DDS Email Intelligence Briefing")
-    parser.add_argument("--mode", choices=["morning", "lunch", "daybreak"], default="morning", help="Briefing time-window mode")
+    parser.add_argument("--mode", choices=["morning", "lunch", "wrapup"], default="morning", help="Briefing time-window mode")
     parser.add_argument("--dry-run", action="store_true", help="Do not send to Telegram or Gmail")
     args = parser.parse_args()
     
     try:
-        run_briefing(args.mode, args.dry_run)
+        brief = run_briefing(args.mode, args.dry_run)
+        if args.dry_run:
+            print("\n--- DRY RUN BRIEFING OUTPUT ---")
+            print(brief)
+            print("-------------------------------\n")
     except Exception as e:
         log(f"FATAL: {type(e).__name__}: {e}", args.mode)
         
