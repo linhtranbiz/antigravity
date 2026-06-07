@@ -63,6 +63,26 @@ PEER_USERNAMES = {p.lstrip("@").lower() for p in PEER_BOTS}
 # Rey's own Telegram username (no '@'), resolved at startup via get_me().
 REY_USERNAME = None
 
+# ── Open Council Discussion config ────────────────────────────────────────────
+# When ON, any substantive message in a whitelisted council chat is thrown open
+# to the whole council; every bot may freely contribute. Restraints below exist
+# ONLY to stop runaway loops / cost, not to limit what bots may discuss.
+COUNCIL_OPEN_MODE = os.getenv("COUNCIL_OPEN_MODE", "true").strip().lower() in ("1", "true", "yes", "on")
+# Max messages a single bot may add to one discussion thread.
+try:
+    THREAD_BOT_LIMIT = int(os.getenv("COUNCIL_THREAD_BOT_LIMIT", "3"))
+except ValueError:
+    THREAD_BOT_LIMIT = 3
+# Hard ceiling on total messages in one thread before it auto-closes.
+try:
+    THREAD_MAX_MSGS = int(os.getenv("COUNCIL_THREAD_MAX_MSGS", "24"))
+except ValueError:
+    THREAD_MAX_MSGS = 24
+# A bot replies with EXACTLY this token when it has nothing new to add (stays silent).
+PASS_TOKEN = "[[PASS]]"
+# Skip opening a thread for trivial chatter shorter than this many chars.
+MIN_TOPIC_CHARS = 8
+
 _MENTION_RE = re.compile(r"@([A-Za-z0-9_]{3,32})")
 
 def extract_peer_mentions(text: str):
@@ -273,6 +293,24 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ You are not authorized to use this bot.")
         return
 
+    # ── Open council discussion ──────────────────────────────────────────────
+    # In a whitelisted council chat with open mode on, throw the topic open to
+    # the WHOLE council instead of a single inline reply. Rey and every peer pick
+    # it up via the broadcast loop and freely contribute (with Linh-Tran priority).
+    if COUNCIL_OPEN_MODE and chat_whitelisted and chat_type in ("group", "supergroup"):
+        topic = update.message.text.strip()
+        if len(topic) >= MIN_TOPIC_CHARS:
+            opener = update.effective_user.username or update.effective_user.first_name or str(user_id)
+            try:
+                _id, thread_id = await asyncio.to_thread(
+                    council_relay.post_broadcast,
+                    f"human:{opener}", chat_id, topic, 0, None,
+                )
+                logger.info(f"Opened council thread {thread_id[:8]} from {opener} in chat {chat_id}")
+            except Exception as e:
+                logger.error(f"Failed to open council thread: {e}")
+        return
+
     # Check response conditions
     should_respond = False
     if chat_type == "private":
@@ -397,6 +435,101 @@ async def relay_poll_loop(bot):
             logger.error(f"Error in relay poll loop: {e}")
         await asyncio.sleep(3)
 
+# ── Open Council Discussion engine ────────────────────────────────────────────
+def _format_thread(history) -> str:
+    """Render recent thread messages as a readable transcript for the LLM."""
+    lines = []
+    for h in history:
+        who = h["sender"]
+        who = who.replace("human:", "👤 ") if who.startswith("human:") else f"@{who}"
+        lines.append(f"{who}: {h['text']}")
+    return "\n".join(lines)
+
+async def process_broadcast(bot, b: dict):
+    """Decide whether Rey contributes to an open council thread, and if so, speak."""
+    sender = b.get("sender", "unknown")
+    chat_id = b.get("chat_id")
+    text = b.get("text", "")
+    depth = b.get("depth", 0)
+    thread_id = b.get("thread_id")
+    if not thread_id:
+        return
+
+    # Loop / cost guards — these bound runaway chatter, not the topics themselves.
+    if depth >= council_relay.max_hops():
+        return
+    if await asyncio.to_thread(council_relay.thread_count, thread_id) >= THREAD_MAX_MSGS:
+        return
+    if await asyncio.to_thread(council_relay.thread_sender_count, thread_id, REY_USERNAME) >= THREAD_BOT_LIMIT:
+        return
+
+    history = await asyncio.to_thread(council_relay.thread_recent, thread_id, 12)
+    transcript = _format_thread(history)
+    directly_addressed = REY_USERNAME in extract_peer_mentions(text) or (REY_USERNAME or "") in text.lower()
+
+    framed = (
+        "[Open NBC Council discussion]\n"
+        "You (Rey) are in a free-flowing discussion with peer council bots. The floor is open.\n\n"
+        f"Discussion so far:\n{transcript}\n\n"
+        f"Latest from {sender}: {text}\n\n"
+        "Contribute your perspective from YOUR domain (Chief of Staff / executive intelligence). "
+        "PRIORITY RULE: if anything here concerns Linh Trần — his decisions, risks, finances, "
+        "schedule, businesses (DDS Group, DDS Petro, Van Ninh Port) — treat it as top priority and "
+        "drive toward concretely helping Linh solve it: surface the key issue, give a clear recommendation "
+        "or next action, and @mention the right council bot if their expertise is needed.\n"
+        f"If you have nothing materially NEW to add, reply with EXACTLY {PASS_TOKEN} and nothing else. "
+        "Be concise, executive-grade, and never repeat what was already said."
+    )
+
+    try:
+        response_text = await asyncio.to_thread(
+            call_claude_with_tools, messages=[{"role": "user", "content": framed}]
+        )
+    except Exception as e:
+        logger.error(f"Open discussion processing failed (thread {thread_id[:8]}): {e}")
+        return
+
+    # Stay silent unless Rey actually has something to add.
+    if response_text.strip() == PASS_TOKEN or (PASS_TOKEN in response_text and len(response_text.strip()) <= len(PASS_TOKEN) + 4):
+        if not directly_addressed:
+            logger.info(f"Rey passed on thread {thread_id[:8]} (nothing new).")
+            return
+        # Directly addressed but model tried to pass — strip the token and answer anyway.
+        response_text = response_text.replace(PASS_TOKEN, "").strip() or "Noted — no further input from my side right now."
+
+    if chat_id:
+        try:
+            await send_message_safe(bot, chat_id, response_text)
+        except Exception as e:
+            logger.error(f"Failed to post council contribution to chat {chat_id}: {e}")
+
+    # Re-broadcast Rey's contribution so peers can react (depth-guarded).
+    try:
+        await asyncio.to_thread(
+            council_relay.post_broadcast,
+            REY_USERNAME, chat_id, response_text, depth + 1, thread_id,
+        )
+    except Exception as e:
+        logger.error(f"Failed to re-broadcast Rey's contribution: {e}")
+
+async def broadcast_poll_loop(bot):
+    """Poll the shared relay for OPEN discussion messages and let Rey join in."""
+    if REY_USERNAME is None:
+        logger.warning("Broadcast poll loop: Rey username unresolved; open mode disabled.")
+        return
+    if not COUNCIL_OPEN_MODE:
+        logger.info("Open council mode is OFF; broadcast poll loop not started.")
+        return
+    logger.info(f"Open council discussion loop started for @{REY_USERNAME}.")
+    while True:
+        try:
+            news = await asyncio.to_thread(council_relay.fetch_new_broadcasts, REY_USERNAME, 20)
+            for b in news:
+                await process_broadcast(bot, b)
+        except Exception as e:
+            logger.error(f"Error in broadcast poll loop: {e}")
+        await asyncio.sleep(3)
+
 # ── Scheduler background loop ─────────────────────────────────────────────────
 async def run_scheduled_briefing(bot, mode: str):
     """Utility to run and send scheduled briefing."""
@@ -517,8 +650,9 @@ async def main():
 
     # Start scheduler loop as a background asyncio task
     asyncio.create_task(scheduler_loop(application.bot))
-    # Start council relay poll loop
+    # Start council relay poll loops (direct asks + open discussion)
     asyncio.create_task(relay_poll_loop(application.bot))
+    asyncio.create_task(broadcast_poll_loop(application.bot))
     
     logger.info("DDS Briefing Bot server started successfully.")
     
