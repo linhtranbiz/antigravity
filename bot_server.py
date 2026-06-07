@@ -43,10 +43,27 @@ START_TIME = dt.datetime.now()
 _auth_str = os.getenv("AUTHORIZED_USER_IDS", "").strip()
 AUTHORIZED_IDS = {int(uid.strip()) for uid in _auth_str.split(",") if uid.strip()} if _auth_str else set()
 
+# Group/supergroup chats where the bot is fully enabled for multi-bot coordination.
+# In these chats, ANY member (including peer bots) may summon Rey via @mention/reply,
+# without each sender needing to be listed in AUTHORIZED_USER_IDS.
+_chat_str = os.getenv("AUTHORIZED_CHAT_IDS", "").strip()
+AUTHORIZED_CHAT_IDS = {int(cid.strip()) for cid in _chat_str.split(",") if cid.strip()} if _chat_str else set()
+
+# Peer bot @usernames Rey may coordinate with and @mention systematically.
+_peer_str = os.getenv("PEER_BOTS", "").strip()
+PEER_BOTS = [
+    (u.strip() if u.strip().startswith("@") else f"@{u.strip()}")
+    for u in _peer_str.split(",") if u.strip()
+]
+
 def is_authorized(user_id: int) -> bool:
     if not AUTHORIZED_IDS:
         return True  # If not configured, allow all (not recommended)
     return user_id in AUTHORIZED_IDS
+
+def is_authorized_chat(chat_id: int) -> bool:
+    """True if the chat itself is whitelisted (multi-bot coordination group)."""
+    return chat_id in AUTHORIZED_CHAT_IDS
 
 # ── Scheduler State ───────────────────────────────────────────────────────────
 last_runs = {
@@ -226,8 +243,11 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_type = update.effective_chat.type
 
-    # Authorization check
-    if not is_authorized(user_id):
+    # Authorization check.
+    # Allow if the user is individually whitelisted OR the chat itself is a
+    # whitelisted multi-bot coordination group/supergroup.
+    chat_whitelisted = is_authorized_chat(chat_id)
+    if not (is_authorized(user_id) or chat_whitelisted):
         # In DMs, respond with unauthorized. In groups, ignore completely to prevent spam.
         if chat_type == "private":
             await update.message.reply_text("❌ You are not authorized to use this bot.")

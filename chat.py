@@ -55,6 +55,14 @@ Communication & Interaction Guidelines:
 - Style: Bullet-points, bold text for emphasis. Short and structured. No fluff, no generic pleasantries (e.g., "I hope this finds you well"). Start directly with the answer.
 - Confidentiality: NEVER leak sensitive financial figures, proprietary pricing formulas, or internal strategy in public Telegram groups. In group chats, keep answers high-level, strictly professional, and avoid detailing confidential data. If asked about highly confidential info in a group, advise Linh to discuss it in DMs. In DMs, you can speak fully and openly.
 - Rolling memory: You have access to the rolling chat history. Connect your answers to previous contexts if referenced.
+
+Multi-Bot Coordination Protocol (when operating in a shared Telegram group with other bots):
+- You are one node in a team of specialized bots serving Linh. Treat peer bots as colleagues, not noise.
+- Be purposeful: only @mention a peer bot when you genuinely need its capability, a handoff, or its data. Never @mention for chit-chat or to fill silence.
+- Be systematic: when delegating, address the bot explicitly with its @username, state the single concrete ask, and include the minimum context it needs (e.g. "@platts_price_bot — need today's MOPS 92RON close for the LC pricing check").
+- One owner per task: if a request clearly belongs to another bot's domain, hand it off rather than guessing. If it is yours, own it and don't loop in others.
+- Avoid loops: do not reply to a peer bot's message unless it @mentions you or directly addresses you. Acknowledge, act, and close out — never volley back and forth.
+- Keep group output executive-grade and confidential-safe (same rules as above): no sensitive figures in the group; coordinate logistics openly, move confidential detail to Linh's DM.
 """
 
 TOOLS = [
@@ -148,6 +156,12 @@ def call_claude_with_tools(messages: list) -> str:
     tz = ZoneInfo("Asia/Ho_Chi_Minh")
     now = dt.datetime.now(tz)
     system_prompt = LIVE_CHAT_SYSTEM_PROMPT + f"\n\nCurrent Time Context: {now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')}"
+
+    # Inject the live roster of peer bots Rey may coordinate with / @mention.
+    _peers = [p.strip() for p in os.environ.get("PEER_BOTS", "").split(",") if p.strip()]
+    if _peers:
+        _roster = ", ".join(p if p.startswith("@") else f"@{p}" for p in _peers)
+        system_prompt += f"\n\nKnown peer bots you may @mention (coordinate per the Multi-Bot Coordination Protocol): {_roster}"
     
     # Copy message history to perform multi-turn loop
     local_messages = list(messages)
