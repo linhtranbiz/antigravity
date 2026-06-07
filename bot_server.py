@@ -5,6 +5,7 @@ Integrates Telegram command polling and an internal async scheduler to trigger
 automatic briefings at 07:30, 11:30, and 16:00 ICT.
 """
 import os
+import re
 import sys
 import asyncio
 import logging
@@ -18,6 +19,7 @@ sys.path.append(str(ROOT))
 
 from main import run_briefing, WINDOWS, LABELS, TZ, log
 from chat import call_claude_with_tools
+import council_relay
 
 try:
     from telegram import Update
@@ -55,6 +57,18 @@ PEER_BOTS = [
     (u.strip() if u.strip().startswith("@") else f"@{u.strip()}")
     for u in _peer_str.split(",") if u.strip()
 ]
+# Lowercased usernames (no '@') for fast mention matching / relay routing.
+PEER_USERNAMES = {p.lstrip("@").lower() for p in PEER_BOTS}
+
+# Rey's own Telegram username (no '@'), resolved at startup via get_me().
+REY_USERNAME = None
+
+_MENTION_RE = re.compile(r"@([A-Za-z0-9_]{3,32})")
+
+def extract_peer_mentions(text: str):
+    """Return the list of known peer-bot usernames @mentioned in `text`."""
+    found = {m.lower() for m in _MENTION_RE.findall(text or "")}
+    return [u for u in found if u in PEER_USERNAMES and u != REY_USERNAME]
 
 def is_authorized(user_id: int) -> bool:
     if not AUTHORIZED_IDS:
@@ -183,24 +197,30 @@ async def daybreak_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Stores rolling chat history per chat_id: chat_id -> list of {"role": "user"|"assistant", "content": "..."}
 chat_histories = {}
 
-async def reply_message_safe(update: Update, text: str):
-    """Sends text in chunks of <= 4000 chars to avoid Telegram message length limit."""
-    if len(text) <= 4000:
-        await update.message.reply_text(text)
-        return
-        
+def _chunk_text(text: str, limit: int = 4000):
+    """Split text into <= limit-char chunks on paragraph boundaries."""
+    if len(text) <= limit:
+        return [text]
     chunks, cur = [], ""
     for para in text.split("\n\n"):
-        if len(cur) + len(para) + 2 > 4000:
+        if len(cur) + len(para) + 2 > limit:
             chunks.append(cur)
             cur = para
         else:
             cur = (cur + "\n\n" + para) if cur else para
     if cur:
         chunks.append(cur)
-        
-    for chunk in chunks:
+    return chunks
+
+async def reply_message_safe(update: Update, text: str):
+    """Reply in chunks of <= 4000 chars to avoid Telegram's message length limit."""
+    for chunk in _chunk_text(text):
         await update.message.reply_text(chunk)
+
+async def send_message_safe(bot, chat_id, text: str):
+    """Send (not reply) in chunks via the bot, for relay-originated messages."""
+    for chunk in _chunk_text(text):
+        await bot.send_message(chat_id=chat_id, text=chunk)
 
 async def ask_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_authorized(update.effective_user.id):
@@ -300,11 +320,82 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         chat_histories[chat_id] = chat_histories[chat_id][-40:]
         await reply_message_safe(update, response_text)
+        # If Rey addressed a live peer bot, hand the ask off via the council relay
+        # (Telegram won't deliver it bot-to-bot). Human-initiated turn => depth 0.
+        relay_outbound(response_text, chat_id, depth=0)
     except Exception as e:
         logger.error(f"Error handling message: {e}")
         if chat_histories[chat_id] and chat_histories[chat_id][-1]["role"] == "user":
             chat_histories[chat_id].pop() # Remove failed user message
         await update.message.reply_text(f"❌ Error: {e}")
+
+# ── Council Bot-to-Bot Relay ──────────────────────────────────────────────────
+def relay_outbound(text: str, chat_id, depth: int):
+    """Queue an inter-bot ask for every live peer Rey @mentioned in `text`.
+
+    Bounded by COUNCIL_MAX_HOPS so council bots can't loop forever.
+    """
+    if depth >= council_relay.max_hops():
+        return []
+    targets = extract_peer_mentions(text)
+    for t in targets:
+        try:
+            council_relay.post_message(
+                sender=REY_USERNAME or "rey",
+                recipient=t,
+                chat_id=chat_id,
+                text=text,
+                depth=depth + 1,
+            )
+            logger.info(f"Relay → @{t} (depth {depth + 1}) in chat {chat_id}")
+        except Exception as e:
+            logger.error(f"Failed to relay to @{t}: {e}")
+    return targets
+
+async def process_relay_message(bot, msg: dict):
+    """Answer an inter-bot ask addressed to Rey, then relay onward if needed."""
+    sender = msg.get("sender", "unknown")
+    chat_id = msg.get("chat_id")
+    text = msg.get("text", "")
+    depth = msg.get("depth", 0)
+
+    framed = (
+        f"[Council relay] @{sender} addressed you (Rey) in the group:\n\n{text}\n\n"
+        "If this is your domain, answer directly and concisely for the group. "
+        "If it belongs to another council bot, hand off with a single @mention. "
+        "Do not simply echo the request back."
+    )
+    try:
+        response_text = await asyncio.to_thread(
+            call_claude_with_tools, messages=[{"role": "user", "content": framed}]
+        )
+    except Exception as e:
+        logger.error(f"Relay processing failed (from @{sender}): {e}")
+        return
+
+    if chat_id:
+        try:
+            await send_message_safe(bot, chat_id, response_text)
+        except Exception as e:
+            logger.error(f"Failed to post relay reply to chat {chat_id}: {e}")
+
+    # Continue the chain if Rey handed off to another peer (depth-guarded).
+    relay_outbound(response_text, chat_id, depth=depth)
+
+async def relay_poll_loop(bot):
+    """Poll the shared relay for asks addressed to Rey and handle them."""
+    if REY_USERNAME is None:
+        logger.warning("Relay poll loop: Rey username unresolved; relay disabled.")
+        return
+    logger.info(f"Council relay poll loop started for @{REY_USERNAME}.")
+    while True:
+        try:
+            msgs = await asyncio.to_thread(council_relay.claim_unread, REY_USERNAME, 10)
+            for m in msgs:
+                await process_relay_message(bot, m)
+        except Exception as e:
+            logger.error(f"Error in relay poll loop: {e}")
+        await asyncio.sleep(3)
 
 # ── Scheduler background loop ─────────────────────────────────────────────────
 async def run_scheduled_briefing(bot, mode: str):
@@ -410,9 +501,24 @@ async def main():
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
-    
+
+    # Resolve Rey's own username (relay routing key) and init the shared relay.
+    global REY_USERNAME
+    try:
+        me = await application.bot.get_me()
+        REY_USERNAME = (me.username or "").lower() or None
+        council_relay.init_db()
+        logger.info(
+            f"Council relay ready: identity=@{REY_USERNAME}, "
+            f"db={council_relay.db_path()}, peers={sorted(PEER_USERNAMES) or 'none'}"
+        )
+    except Exception as e:
+        logger.error(f"Failed to initialize council relay: {e}")
+
     # Start scheduler loop as a background asyncio task
     asyncio.create_task(scheduler_loop(application.bot))
+    # Start council relay poll loop
+    asyncio.create_task(relay_poll_loop(application.bot))
     
     logger.info("DDS Briefing Bot server started successfully.")
     
