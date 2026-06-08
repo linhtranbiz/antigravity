@@ -377,7 +377,17 @@ def send_telegram(text, mode):
                     data={"chat_id": chat, "text": chunk, "parse_mode": "Markdown"},
                     timeout=15,
                 )
-                ok = r.json().get("ok")
+                res = r.json()
+                ok = res.get("ok")
+                if not ok:
+                    # Fallback to plain text if markdown parsing fails
+                    r = requests.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        data={"chat_id": chat, "text": chunk},
+                        timeout=15,
+                    )
+                    res = r.json()
+                    ok = res.get("ok")
                 log(f"Telegram chat={chat} chunk={i+1}/{len(chunks)} ok={ok}", mode)
             except Exception as e:
                 log(f"Telegram send failed to {chat}: {e}", mode)
