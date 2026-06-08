@@ -1,0 +1,12 @@
+[Unit]
+Description=Rey Tran Bot Auto-Rollback Service
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/opt/email-intel-bot/time_machine.sh auto-rollback
+StandardOutput=journal+console
+StandardError=journal+console
+
+[Install]
+WantedBy=multi-user.target

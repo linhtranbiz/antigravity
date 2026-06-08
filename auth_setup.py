@@ -53,7 +53,12 @@ def main():
         if not creds or not creds.valid:
             if creds and creds.expired and creds.refresh_token:
                 print("Refreshing expired credentials...")
-                creds.refresh(Request())
+                try:
+                    creds.refresh(Request())
+                except Exception as refresh_err:
+                    print(f"Failed to refresh credentials ({refresh_err}). Re-authenticating via browser...")
+                    flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)
+                    creds = flow.run_local_server(port=0)
             else:
                 print("Opening browser for Google Authentication flow...")
                 flow = InstalledAppFlow.from_client_secrets_file('credentials.json', SCOPES)

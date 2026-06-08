@@ -133,6 +133,8 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔹 /lunch - Triggers the Lunch Brief (07:30 today → 11:30 today)\n"
         "🔹 /daybreak - Triggers the Day Break Brief (11:30 today → 16:00 today)\n"
         "🔹 /status - Checks system configuration and scheduled runs\n"
+        "🔹 /backups - Lists available system backups on VPS\n"
+        "🔹 /rollback [name] - Reverts bot code to a previous snapshot\n"
         "🔹 /help - Show this command reference list",
         parse_mode="Markdown"
     )
@@ -274,6 +276,70 @@ async def reset_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
     chat_histories[chat_id] = []
     await update.message.reply_text("🔄 Chat history has been reset for this chat.")
+
+async def backups_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    await update.message.chat.send_action(action="typing")
+    
+    try:
+        import subprocess
+        script_path = ROOT / "time_machine.sh"
+        if not script_path.exists():
+            await update.message.reply_text("❌ Error: `time_machine.sh` not found on this system.")
+            return
+            
+        result = await asyncio.to_thread(
+            subprocess.run,
+            [str(script_path), "list"],
+            capture_output=True,
+            text=True,
+            check=True
+        )
+        output = result.stdout.strip()
+        await update.message.reply_text(
+            f"📁 *Rey Tran Bot Time Machine*\n\n{output}",
+            parse_mode="Markdown"
+        )
+    except Exception as e:
+        logger.error(f"Error listing backups: {e}")
+        await update.message.reply_text(f"❌ Error: {e}")
+
+async def rollback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    backup_name = " ".join(context.args).strip()
+    
+    script_path = ROOT / "time_machine.sh"
+    if not script_path.exists():
+        await update.message.reply_text("❌ Error: `time_machine.sh` not found on this system.")
+        return
+        
+    await update.message.reply_text(
+        f"⏳ *Initiating Rollback...*\n"
+        f"Target: `{backup_name if backup_name else 'Latest Backup'}`\n"
+        "Rey will stop, restore files, and restart. Please wait 10-15 seconds...",
+        parse_mode="Markdown"
+    )
+    
+    try:
+        import subprocess
+        # We run the restore command using systemd-run so that it runs in a transient service
+        # outside this bot's service control group. This prevents it from being killed
+        # when time_machine.sh stops the email-intel-bot service.
+        cmd = ["systemd-run", "--description=Rey Tran Bot Manual Rollback", str(script_path), "restore"]
+        if backup_name:
+            cmd.append(backup_name)
+            
+        logger.info(f"Executing manual rollback command: {' '.join(cmd)}")
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception as e:
+        logger.error(f"Error initiating rollback: {e}")
+        await update.message.reply_text(f"❌ Failed to start rollback process: {e}")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -626,6 +692,8 @@ async def main():
     application.add_handler(CommandHandler("daybreak", daybreak_cmd))
     application.add_handler(CommandHandler("ask", ask_cmd))
     application.add_handler(CommandHandler("reset", reset_cmd))
+    application.add_handler(CommandHandler("backups", backups_cmd))
+    application.add_handler(CommandHandler("rollback", rollback_cmd))
     
     # Add Message Handler for general conversations (non-command text)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))

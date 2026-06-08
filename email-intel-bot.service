@@ -1,6 +1,9 @@
 [Unit]
 Description=24/7 Telegram Email Briefing Bot Server
 After=network.target
+StartLimitIntervalSec=60
+StartLimitBurst=3
+OnFailure=email-intel-bot-rollback.service
 
 [Service]
 Type=simple
