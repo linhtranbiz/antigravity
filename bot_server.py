@@ -10,6 +10,7 @@ import sys
 import asyncio
 import logging
 import datetime as dt
+import urllib.request
 from pathlib import Path
 from dotenv import load_dotenv
 
@@ -149,7 +150,21 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check Gmail token
     token_path = ROOT / "token.json"
-    oauth_ok = "✅ Valid" if token_path.exists() else "❌ Missing (run auth_setup.py)"
+    if token_path.exists():
+        try:
+            from google.oauth2.credentials import Credentials
+            from main import SCOPES
+            creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
+            if creds.valid:
+                oauth_ok = "✅ Valid"
+            elif creds.expired and creds.refresh_token:
+                oauth_ok = "⏳ Expired (will auto-refresh on use)"
+            else:
+                oauth_ok = "❌ Invalid/Expired (needs auth_setup.py)"
+        except Exception as e:
+            oauth_ok = f"❌ Error checking token: {e} (run auth_setup.py)"
+    else:
+        oauth_ok = "❌ Missing (run auth_setup.py)"
     
     # Check Env keys
     anthropic_ok = "✅ Configured" if os.environ.get("ANTHROPIC_API_KEY") else "❌ Missing"
@@ -312,7 +327,22 @@ async def rollback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Unauthorized.")
         return
         
-    backup_name = " ".join(context.args).strip()
+    args = context.args
+    if not args:
+        await update.message.reply_text("❌ Password required. Usage: `/rollback [backup_name] <password>`", parse_mode="Markdown")
+        return
+        
+    # Check if the last argument is the correct password
+    password = args[-1].strip()
+    if password != "linhtran":
+        await update.message.reply_text("❌ Invalid password. Usage: `/rollback [backup_name] <password>`", parse_mode="Markdown")
+        return
+        
+    # If there are arguments other than the password, they form the backup_name
+    if len(args) > 1:
+        backup_name = " ".join(args[:-1]).strip()
+    else:
+        backup_name = None
     
     script_path = ROOT / "time_machine.sh"
     if not script_path.exists():
@@ -340,6 +370,104 @@ async def rollback_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f"Error initiating rollback: {e}")
         await update.message.reply_text(f"❌ Failed to start rollback process: {e}")
+
+async def restart_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    args = context.args
+    if not args or args[0].strip() != "linhtran":
+        await update.message.reply_text("❌ Invalid or missing password. Usage: `/restart <password>`", parse_mode="Markdown")
+        return
+        
+    await update.message.reply_text("🔄 *Restarting Rey Tran Bot service...*", parse_mode="Markdown")
+    logger.info("Restart requested via Telegram. Exiting process...")
+    os._exit(1)
+
+async def update_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_authorized(update.effective_user.id):
+        await update.message.reply_text("❌ Unauthorized.")
+        return
+        
+    args = context.args
+    if not args or args[0].strip() != "linhtran":
+        await update.message.reply_text("❌ Invalid or missing password. Usage: `/update <password>`", parse_mode="Markdown")
+        return
+        
+    await update.message.reply_text("⏳ *Checking for updates and pulling latest code...*", parse_mode="Markdown")
+    
+    try:
+        import subprocess
+        result = await asyncio.to_thread(
+            subprocess.run,
+            ["git", "pull"],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=30
+        )
+        
+        output = result.stdout.strip()
+        err = result.stderr.strip()
+        
+        if result.returncode != 0:
+            await update.message.reply_text(
+                f"❌ *Update failed (git pull returned non-zero):*\n`{err or output}`",
+                parse_mode="Markdown"
+            )
+            return
+            
+        if "Already up to date" in output:
+            await update.message.reply_text("✅ *Already up to date.* No restart required.", parse_mode="Markdown")
+            return
+            
+        await update.message.reply_text(
+            f"✅ *Updates pulled successfully:*\n```{output}```\n🔄 Restarting service to apply changes...",
+            parse_mode="Markdown"
+        )
+        logger.info("Update complete. Exiting process to trigger systemd restart...")
+        os._exit(0)
+        
+    except Exception as e:
+        logger.error(f"Error during git update: {e}")
+        await update.message.reply_text(f"❌ *Error executing update:* {e}", parse_mode="Markdown")
+
+async def watchdog_loop(bot):
+    """Monitors bot health: network connectivity and critical services.
+    
+    If it detects persistent disconnection or event loop failure, it restarts the bot.
+    """
+    logger.info("Watchdog monitor loop started.")
+    consecutive_failures = 0
+    while True:
+        await asyncio.sleep(60)  # Check every 60 seconds
+        try:
+            # Check Telegram API connectivity
+            await asyncio.to_thread(
+                urllib.request.urlopen,
+                "https://api.telegram.org",
+                timeout=5
+            )
+            consecutive_failures = 0
+        except Exception as e:
+            consecutive_failures += 1
+            logger.warning(f"Watchdog connectivity check failed ({consecutive_failures}/10): {e}")
+            if consecutive_failures >= 10:
+                logger.fatal("Watchdog: Persistent disconnection detected for 10 minutes. Rebooting service...")
+                try:
+                    chats_str = os.environ.get("TELEGRAM_CHAT_IDS", "")
+                    if chats_str:
+                        first_chat = chats_str.split(",")[0].strip()
+                        if first_chat:
+                            await bot.send_message(
+                                chat_id=first_chat,
+                                text="⚠️ *Watchdog Alert*: Persistent disconnection detected. Rebooting bot service to recover...",
+                                parse_mode="Markdown"
+                            )
+                except Exception:
+                    pass
+                os._exit(1)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -694,6 +822,8 @@ async def main():
     application.add_handler(CommandHandler("reset", reset_cmd))
     application.add_handler(CommandHandler("backups", backups_cmd))
     application.add_handler(CommandHandler("rollback", rollback_cmd))
+    application.add_handler(CommandHandler("restart", restart_cmd))
+    application.add_handler(CommandHandler("update", update_cmd))
     
     # Add Message Handler for general conversations (non-command text)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
@@ -721,6 +851,8 @@ async def main():
     # Start council relay poll loops (direct asks + open discussion)
     asyncio.create_task(relay_poll_loop(application.bot))
     asyncio.create_task(broadcast_poll_loop(application.bot))
+    # Start watchdog loop
+    asyncio.create_task(watchdog_loop(application.bot))
     
     logger.info("DDS Briefing Bot server started successfully.")
     
