@@ -36,7 +36,6 @@ fi
 # 3. Deploy code via rsync
 echo -e "${YELLOW}[3/5] Syncing code to VPS...${NC}"
 rsync -avz --delete \
-  --exclude '.git/' \
   --exclude '__pycache__/' \
   --exclude '.venv/' \
   --exclude 'logs/' \
